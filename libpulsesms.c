@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <glib.h>
+#include <json-glib/json-glib.h>
 
 #include <purple.h>
 
@@ -68,6 +69,9 @@ typedef struct {
 #endif
 
 #define PULSESMS_API_HOST "https://api.messenger.klinkerapps.com"
+
+
+static void pulsesms_create_ctx(PulseSMSAccount *psa);
 
 /*****************************************************************************/
 
@@ -228,11 +232,18 @@ pulsesms_got_contacts(PurpleHttpConnection *http_conn, PurpleHttpResponse *respo
 	gsize len;
 	const gchar *data = purple_http_response_get_data(response, &len);
 	JsonArray *contacts = json_decode_array(data, len);
+	int i;
 
-	for (int i = json_array_get_length(recipients) - 1; i >= 0; i--) {
+	for (i = json_array_get_length(contacts) - 1; i >= 0; i--) {
 		JsonObject *contact = json_array_get_object_element(contacts, i);
 		
+		gchar *phone_number = pulsesms_decrypt(psa, json_object_get_string_member(contact, "phone_number"));
+		gchar *name = pulsesms_decrypt(psa, json_object_get_string_member(contact, "name"));
+		gchar *id_matcher = pulsesms_decrypt(psa, json_object_get_string_member(contact, "id_matcher"));
 		
+		purple_debug_info("pulsesms", "phone_number: %s, name: %s, id_matcher: %s\n", phone_number, name, id_matcher);
+		
+		break;
 	}
 }
 
@@ -244,12 +255,62 @@ pulsesms_fetch_contacts(PulseSMSAccount *psa)
 	PurpleHttpRequest *request = purple_http_request_new(NULL);
 	purple_http_request_set_keepalive_pool(request, psa->keepalive_pool);
 	
-	purple_http_request_set_url_printf(PULSESMS_API_HOST "/api/v1/contacts/simple?account_id=%s", purple_url_encode(account_id));
+	purple_http_request_set_url_printf(request, PULSESMS_API_HOST "/api/v1/contacts/simple?account_id=%s", purple_url_encode(account_id));
 	
 	purple_http_request(psa->pc, request, pulsesms_got_contacts, psa);
 	purple_http_request_unref(request);
 }
 
+static void
+pulsesms_got_login(PurpleHttpConnection *http_conn, PurpleHttpResponse *response, gpointer user_data)
+{
+	PulseSMSAccount *psa = user_data;
+	gsize len;
+	const gchar *data = purple_http_response_get_data(response, &len);
+	JsonObject *info = json_decode_object(data, len);
+	
+	purple_account_set_string(psa->account, "account_id", json_object_get_string_member(info, "account_id"));
+	purple_account_set_string(psa->account, "salt", json_object_get_string_member(info, "salt1"));
+	
+	const gchar *password = purple_connection_get_password(psa->pc);
+	const gchar *salt2 = json_object_get_string_member(info, "salt2");
+	unsigned dklen = 30;
+	unsigned rounds = 10000;
+	uint8_t DK[ dklen ];
+	
+	gc_pbkdf2_sha1(password, strlen(password), salt2, strlen(salt2), rounds, (char*) DK, dklen);
+	
+	gchar *hash = g_base64_encode(DK, dklen);
+	
+	purple_account_set_string(psa->account, "hash", hash);
+	
+	g_free(hash);
+	
+	
+	pulsesms_create_ctx(psa);
+	pulsesms_fetch_contacts(psa);
+}
+
+static void
+pulsesms_send_login(PulseSMSAccount *psa)
+{
+	GString *postbody;
+	
+	PurpleHttpRequest *request = purple_http_request_new(PULSESMS_API_HOST "/api/v1/accounts/login");
+	purple_http_request_set_keepalive_pool(request, psa->keepalive_pool);
+	
+	purple_http_request_set_method(request, "POST");
+	purple_http_request_header_set(request, "Content-type", "application/x-www-form-urlencoded; charset=UTF-8");
+	
+	postbody = g_string_new(NULL);
+	g_string_append_printf(postbody, "username=%s&", purple_url_encode(purple_account_get_username(psa->account)));
+	g_string_append_printf(postbody, "password=%s&", purple_url_encode(purple_connection_get_password(psa->pc)));
+	purple_http_request_set_contents(request, postbody->str, postbody->len);
+	g_string_free(postbody, TRUE);
+	
+	purple_http_request(psa->pc, request, pulsesms_got_login, psa);
+	purple_http_request_unref(request);
+}
 
 /*****************************************************************************/
 
@@ -341,8 +402,10 @@ pulsesms_login(PurpleAccount *account)
 	
 	if (purple_account_get_string(account, "account_id", NULL)) {
 		pulsesms_create_ctx(psa);
+		pulsesms_fetch_contacts(psa);
 	} else if (password && *password) {
 		purple_connection_update_progress(pc, _("Authenticating"), 1, 3);
+		pulsesms_send_login(psa);
 	}
 }
 
