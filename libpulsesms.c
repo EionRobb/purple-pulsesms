@@ -79,9 +79,9 @@ static gchar *
 pulsesms_decrypt(PulseSMSAccount *psa, const gchar *data)
 {
 	gchar **parts = g_strsplit(data, "-:-", 2);
-	gsize text_len;
+	gsize text_len, iv_len;
 	guchar *ciphertext = g_base64_decode(parts[1], &text_len);
-	guchar *IV = g_base64_decode(parts[0], NULL);
+	guchar *IV = g_base64_decode(parts[0], &iv_len);
 	gsize buf_len = text_len + AES_BLOCKLEN - (text_len % AES_BLOCKLEN);
 	
 	guchar *buf = g_new0(guchar, buf_len);
@@ -107,7 +107,7 @@ gc_hmac_sha1(const void *key, size_t keylen, const void *in, size_t inlen, void 
 	
 	hmac = g_hmac_new(G_CHECKSUM_SHA1, key, keylen);
 	g_hmac_update(hmac, in, inlen);
-	g_hmac_get_digest(hmac, resbuf, sizeof(resbuf));
+	g_hmac_get_digest(hmac, resbuf, 20);
 	g_hmac_unref(hmac);
 	
 #else
@@ -118,7 +118,7 @@ gc_hmac_sha1(const void *key, size_t keylen, const void *in, size_t inlen, void 
 	purple_cipher_context_set_option(hmac, "hash", "sha1");
 	purple_cipher_context_set_key_with_len(hmac, (guchar *)key, keylen);
 	purple_cipher_context_append(hmac, (guchar *)in, inlen);
-	purple_cipher_context_digest(hmac, sizeof(resbuf), resbuf, NULL);
+	purple_cipher_context_digest(hmac, 20, resbuf, NULL);
 	purple_cipher_context_destroy(hmac);
 	
 #endif
@@ -400,7 +400,10 @@ pulsesms_login(PurpleAccount *account)
 	
 	purple_connection_set_protocol_data(pc, psa);
 	
-	if (purple_account_get_string(account, "account_id", NULL)) {
+	if (purple_account_get_string(account, "account_id", NULL) && 
+		purple_account_get_string(account, "hash", NULL) &&
+		purple_account_get_string(account, "salt", NULL)) {
+		
 		pulsesms_create_ctx(psa);
 		pulsesms_fetch_contacts(psa);
 	} else if (password && *password) {
