@@ -71,23 +71,23 @@ C_FILES := aes.c pbkdf2_hmac_sha256.c
 PURPLE_COMPAT_FILES := purple2compat/http.c purple2compat/purple-socket.c
 PURPLE_C_FILES := libpulsesms.c $(C_FILES)
 
-
+AES_FLAGS += -DAES256=1 -DECB=0 -DCTR=0 -DCBC=1
 
 .PHONY:	all install FAILNOPURPLE clean
 
 all: $(PULSESMS_TARGET)
 
 libpulsesms.so: $(PURPLE_C_FILES) $(PURPLE_COMPAT_FILES)
-	$(CC) -fPIC $(CFLAGS) -shared -o $@ $^ $(LDFLAGS) `$(PKG_CONFIG) purple glib-2.0 json-glib-1.0 --libs --cflags`  $(INCLUDES) -Ipurple2compat -g -ggdb
+	$(CC) -fPIC $(AES_FLAGS) $(CFLAGS) -shared -o $@ $^ $(LDFLAGS) `$(PKG_CONFIG) purple glib-2.0 json-glib-1.0 --libs --cflags`  $(INCLUDES) -Ipurple2compat -g -ggdb
 
 libpulsesms3.so: $(PURPLE_C_FILES)
-	$(CC) -fPIC $(CFLAGS) -shared -o $@ $^ $(LDFLAGS) `$(PKG_CONFIG) purple-3 glib-2.0 json-glib-1.0 --libs --cflags` $(INCLUDES)  -g -ggdb
+	$(CC) -fPIC $(AES_FLAGS) $(CFLAGS) -shared -o $@ $^ $(LDFLAGS) `$(PKG_CONFIG) purple-3 glib-2.0 json-glib-1.0 --libs --cflags` $(INCLUDES)  -g -ggdb
 
 libpulsesms.dll: $(PURPLE_C_FILES) $(PURPLE_COMPAT_FILES)
-	$(WIN32_CC) -shared -o $@ $^ $(WIN32_PIDGIN2_CFLAGS) $(WIN32_PIDGIN2_LDFLAGS) -Ipurple2compat
+	$(WIN32_CC) $(AES_FLAGS) -shared -o $@ $^ $(WIN32_PIDGIN2_CFLAGS) $(WIN32_PIDGIN2_LDFLAGS) -Ipurple2compat
 
 libpulsesms3.dll: $(PURPLE_C_FILES)
-	$(WIN32_CC) -shared -o $@ $^ $(WIN32_PIDGIN3_CFLAGS) $(WIN32_PIDGIN3_LDFLAGS)
+	$(WIN32_CC) $(AES_FLAGS) -shared -o $@ $^ $(WIN32_PIDGIN3_CFLAGS) $(WIN32_PIDGIN3_LDFLAGS)
 
 install: $(PULSESMS_TARGET) install-icons
 	mkdir -p $(PULSESMS_DEST)

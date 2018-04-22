@@ -33,8 +33,6 @@
 #include <http.h>
 
 // AES library from https://github.com/kokke/tiny-AES-c
-#define ECB 0
-#define CTR 0
 #include "aes.h"
 
 // Use purple's hmac-sha1 impl
@@ -87,6 +85,7 @@ pulsesms_decrypt(PulseSMSAccount *psa, const gchar *data)
 	guchar *buf = g_new0(guchar, buf_len);
 	
 	memcpy(buf, ciphertext, text_len);
+	//XXX: does this need to be PKCS#7 padded?
 	
 	AES_ctx_set_iv(psa->ctx, IV);
 	AES_CBC_decrypt_buffer(psa->ctx, buf, text_len);
@@ -94,6 +93,9 @@ pulsesms_decrypt(PulseSMSAccount *psa, const gchar *data)
 	g_free(ciphertext);
 	g_free(IV);
 	g_strfreev(parts);
+	
+	//strip PKCS#5 padding
+	buf[text_len - buf[text_len - 1]] = '\0';
 	
 	return (gchar *) buf;
 }
@@ -274,7 +276,7 @@ pulsesms_got_login(PurpleHttpConnection *http_conn, PurpleHttpResponse *response
 	
 	const gchar *password = purple_connection_get_password(psa->pc);
 	const gchar *salt2 = json_object_get_string_member(info, "salt2");
-	unsigned dklen = 30;
+	unsigned dklen = 32;
 	unsigned rounds = 10000;
 	uint8_t DK[ dklen ];
 	
@@ -362,7 +364,7 @@ pulsesms_create_ctx(PulseSMSAccount *psa)
 	
 	gchar *combined_key = g_strdup_printf("%s:%s\n", account_id, hash);
 	
-	unsigned dklen = 30;
+	unsigned dklen = 32;
 	unsigned rounds = 10000;
 	uint8_t DK[ dklen ];
 	
