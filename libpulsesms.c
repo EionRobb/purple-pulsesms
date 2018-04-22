@@ -136,7 +136,7 @@ json_decode(const gchar *data, gssize len)
 	
 	if (!data || !json_parser_load_from_data(parser, data, len, NULL))
 	{
-		purple_debug_error("hangouts", "Error parsing JSON: %s\n", data);
+		purple_debug_error("pulsesms", "Error parsing JSON: %s\n", data);
 	} else {
 		root = json_parser_get_root(parser);
 		if (root != NULL) {
@@ -217,7 +217,7 @@ pulsesms_send_im(PurpleConnection *pc,
 	g_string_append_printf(postbody, "account_id=%s&", purple_url_encode(purple_account_get_string(psa->account, "account_id", "")));
 	g_string_append_printf(postbody, "to=%s&", purple_url_encode(who));
 	g_string_append_printf(postbody, "message=%s&", purple_url_encode(message));
-	g_string_append_printf(postbody, "sent_device=0&");
+	g_string_append_printf(postbody, "sent_device=3&"); //Native client
 	purple_http_request_set_contents(request, postbody->str, postbody->len);
 	g_string_free(postbody, TRUE);
 	
@@ -235,6 +235,13 @@ pulsesms_got_contacts(PurpleHttpConnection *http_conn, PurpleHttpResponse *respo
 	const gchar *data = purple_http_response_get_data(response, &len);
 	JsonArray *contacts = json_decode_array(data, len);
 	int i;
+	
+	PurpleGroup *group = purple_blist_find_group("PulseSMS");
+
+	if (!group) {
+		group = purple_group_new("PulseSMS");
+		purple_blist_add_group(group, NULL);
+	}
 
 	for (i = json_array_get_length(contacts) - 1; i >= 0; i--) {
 		JsonObject *contact = json_array_get_object_element(contacts, i);
@@ -245,7 +252,14 @@ pulsesms_got_contacts(PurpleHttpConnection *http_conn, PurpleHttpResponse *respo
 		
 		purple_debug_info("pulsesms", "phone_number: %s, name: %s, id_matcher: %s\n", phone_number, name, id_matcher);
 		
-		break;
+		PurpleBuddy *buddy = purple_blist_find_buddy(psa->account, phone_number);
+
+		if (buddy == NULL) {
+			buddy = purple_buddy_new(psa->account, phone_number, name);
+			purple_blist_add_buddy(buddy, NULL, group, NULL);
+		}
+		
+		purple_protocol_got_user_status(psa->account, phone_number, "mobile", NULL);
 	}
 }
 
@@ -261,6 +275,19 @@ pulsesms_fetch_contacts(PulseSMSAccount *psa)
 	
 	purple_http_request(psa->pc, request, pulsesms_got_contacts, psa);
 	purple_http_request_unref(request);
+}
+
+static void
+pulsesms_start_stuff(PulseSMSAccount *psa)
+{
+	//TODO
+	//wss://api.messenger.klinkerapps.com/api/v1/stream?account_id=
+	
+	
+	pulsesms_create_ctx(psa);
+	pulsesms_fetch_contacts(psa);
+	
+	purple_connection_set_state(psa->pc, PURPLE_CONNECTION_CONNECTED);
 }
 
 static void
@@ -288,9 +315,7 @@ pulsesms_got_login(PurpleHttpConnection *http_conn, PurpleHttpResponse *response
 	
 	g_free(hash);
 	
-	
-	pulsesms_create_ctx(psa);
-	pulsesms_fetch_contacts(psa);
+	pulsesms_start_stuff(psa);
 }
 
 static void
@@ -406,8 +431,7 @@ pulsesms_login(PurpleAccount *account)
 		purple_account_get_string(account, "hash", NULL) &&
 		purple_account_get_string(account, "salt", NULL)) {
 		
-		pulsesms_create_ctx(psa);
-		pulsesms_fetch_contacts(psa);
+		pulsesms_start_stuff(psa);
 	} else if (password && *password) {
 		purple_connection_update_progress(pc, _("Authenticating"), 1, 3);
 		pulsesms_send_login(psa);
@@ -446,6 +470,9 @@ pulsesms_status_types(PurpleAccount *account)
 {
 	GList *types = NULL;
 	PurpleStatusType *status;
+	
+	status = purple_status_type_new_full(PURPLE_STATUS_MOBILE, "mobile", _("Phone"), FALSE, FALSE, FALSE);
+	types = g_list_append(types, status);
 	
 	status = purple_status_type_new_full(PURPLE_STATUS_AVAILABLE, NULL, NULL, TRUE, TRUE, FALSE);
 	types = g_list_append(types, status);
