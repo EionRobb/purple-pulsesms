@@ -26,6 +26,10 @@
 #include <glib.h>
 #include <json-glib/json-glib.h>
 
+#if !GLIB_CHECK_VERSION(2, 32, 0)
+#define g_hash_table_contains(hash_table, key) g_hash_table_lookup_extended(hash_table, key, NULL, NULL)
+#endif /* 2.32.0 */
+
 #include <purple.h>
 
 #include "purplecompat.h"
@@ -49,11 +53,16 @@ typedef struct {
 	GHashTable *sent_message_ids;// A store of message id's that we generated from this instance
 	
 	struct AES_ctx* ctx;
+	guint conv_fetch_timeout;
+	gint64 last_conv_timestamp;
+	
+	GHashTable *im_conversations;     // conv_id -> phone number
+	GHashTable *im_conversations_rev; // phone#  -> conv_id
 } PulseSMSAccount;
 
 
 #ifdef ENABLE_NLS
-#      define GETTEXT_PACKAGE "purple-discord"
+#      define GETTEXT_PACKAGE "purple-pulsesms"
 #      include <glib/gi18n-lib.h>
 #	ifdef _WIN32
 #		ifdef LOCALEDIR
@@ -250,7 +259,10 @@ pulsesms_got_contacts(PurpleHttpConnection *http_conn, PurpleHttpResponse *respo
 		gchar *name = pulsesms_decrypt(psa, json_object_get_string_member(contact, "name"));
 		gchar *id_matcher = pulsesms_decrypt(psa, json_object_get_string_member(contact, "id_matcher"));
 		
-		purple_debug_info("pulsesms", "phone_number: %s, name: %s, id_matcher: %s\n", phone_number, name, id_matcher);
+		//purple_debug_info("pulsesms", "phone_number: %s, name: %s, id_matcher: %s\n", phone_number, name, id_matcher);
+		
+		//TODO use this to join contacts together with their international number equivalents
+		(void) id_matcher;
 		
 		PurpleBuddy *buddy = purple_blist_find_buddy(psa->account, phone_number);
 
@@ -278,6 +290,153 @@ pulsesms_fetch_contacts(PulseSMSAccount *psa)
 }
 
 static void
+pulsesms_got_conversation_history(PurpleHttpConnection *http_conn, PurpleHttpResponse *response, gpointer user_data)
+{
+	PulseSMSAccount *psa = user_data;
+	PurpleHttpRequest *request = purple_http_conn_get_request(http_conn);
+	gchar *conv_id_str = g_dataset_get_data(request, "conv_id");
+	gchar *since_str = g_dataset_get_data(request, "since");
+	gsize len;
+	gint i;
+	const gchar *data = purple_http_response_get_data(response, &len);
+	JsonArray *messages = json_decode_array(data, len);
+	gint64 conv_id = g_ascii_strtoll(conv_id_str, NULL, 10);
+	gint64 since = g_ascii_strtoll(since_str, NULL, 10);
+	const gchar *phone_number = g_hash_table_lookup(psa->im_conversations, &conv_id);
+	
+	if (phone_number == NULL) {
+		purple_debug_error("pulsesms", "Error, unknown conversation id %s\n", conv_id_str);
+		
+		// use /api/v1/conversations/" conv_id "?account_id=... to lookup unknown conv ids
+		
+		g_free(conv_id_str);
+		g_free(since_str);
+		return;
+	}
+	
+	for (i = json_array_get_length(messages) - 1; i >= 0; i--) {
+		JsonObject *message = json_array_get_object_element(messages, i);
+		gint64 message_type = json_object_get_int_member(message, "message_type");
+		gchar *data = pulsesms_decrypt(psa, json_object_get_string_member(message, "data"));
+		gchar *escaped_data = purple_markup_escape_text(data, -1);
+		gint64 timestamp = json_object_get_int_member(message, "timestamp");
+		
+		  //if (message.message_type == 0) { // received or media
+		  //} else if (message.message_type == 6) {  //media preview
+		  //} else if (message.message_type == 3) {  //error
+		  //} else if (message.message_type == 5) {  //info
+			//} else {  //sent message   (2 sending, 1 sent)?
+		if (timestamp > since) {
+			if (message_type == 0) {
+				purple_serv_got_im(psa->pc, phone_number, escaped_data, PURPLE_MESSAGE_RECV, timestamp / 1000);
+				
+			} else if (message_type == 1 || message_type == 2) {
+				PurpleConversation *conv;
+				PurpleIMConversation *imconv;
+				PurpleMessage *msg;
+
+				imconv = purple_conversations_find_im_with_account(phone_number, psa->account);
+
+				if (imconv == NULL) {
+					imconv = purple_im_conversation_new(psa->account, phone_number);
+				}
+
+				conv = PURPLE_CONVERSATION(imconv);
+
+				if (escaped_data && *escaped_data) {
+					msg = purple_message_new_outgoing(phone_number, escaped_data, PURPLE_MESSAGE_SEND | PURPLE_MESSAGE_REMOTE_SEND | PURPLE_MESSAGE_DELAYED);
+					purple_message_set_time(msg, timestamp / 1000);
+					purple_conversation_write_message(conv, msg);
+					purple_message_destroy(msg);
+				}
+			}
+		}
+		
+		g_free(data);
+		g_free(escaped_data);
+  
+	}
+	
+	g_free(conv_id_str);
+	g_free(since_str);
+}
+
+static void
+pulsesms_fetch_conversation_history(PulseSMSAccount *psa, gint64 conv_id, gint64 since)
+{
+	const gchar *account_id = purple_account_get_string(psa->account, "account_id", NULL);
+	
+	PurpleHttpRequest *request = purple_http_request_new(NULL);
+	purple_http_request_set_keepalive_pool(request, psa->keepalive_pool);
+	
+	purple_http_request_set_url_printf(request, PULSESMS_API_HOST "/api/v1/messages?account_id=%s&conversation_id=%" G_GINT64_FORMAT "&limit=20", purple_url_encode(account_id), conv_id);
+	
+	g_dataset_set_data(request, "conv_id", g_strdup_printf("%" G_GINT64_FORMAT, conv_id));
+	g_dataset_set_data(request, "since", g_strdup_printf("%" G_GINT64_FORMAT, since));
+	purple_http_request(psa->pc, request, pulsesms_got_conversation_history, psa);
+	purple_http_request_unref(request);
+}
+
+static void
+pulsesms_got_conversations(PurpleHttpConnection *http_conn, PurpleHttpResponse *response, gpointer user_data)
+{
+	PulseSMSAccount *psa = user_data;
+	gsize len;
+	const gchar *data = purple_http_response_get_data(response, &len);
+	JsonArray *conversations = json_decode_array(data, len);
+	int i;
+	gint64 max_timestamp = 0;
+
+	for (i = json_array_get_length(conversations) - 1; i >= 0; i--) {
+		JsonObject *conversation = json_array_get_object_element(conversations, i);
+		
+		gint64 conv_id = json_object_get_int_member(conversation, "device_id");
+		gchar *phone_number = pulsesms_decrypt(psa, json_object_get_string_member(conversation, "phone_numbers"));
+		gint64 timestamp = json_object_get_int_member(conversation, "timestamp");
+		
+		//purple_debug_misc("pulsesms", "Phone number %s conv_id %" G_GINT64_FORMAT " timestamp %" G_GINT64_FORMAT "\n", phone_number, conv_id, timestamp);
+		
+		if (timestamp > max_timestamp) {
+			max_timestamp = timestamp;
+		}
+		if (psa->last_conv_timestamp && timestamp > psa->last_conv_timestamp) {
+			if (!g_hash_table_contains(psa->im_conversations, &conv_id)) {
+				g_hash_table_insert(psa->im_conversations, g_memdup(&conv_id, sizeof(gint64)), g_strdup(phone_number));
+				g_hash_table_insert(psa->im_conversations_rev, g_strdup(phone_number), GUINT_TO_POINTER((guint) conv_id));
+			}
+			
+			pulsesms_fetch_conversation_history(psa, conv_id, psa->last_conv_timestamp);
+		}
+		
+		g_free(phone_number);
+	}
+	
+	if (max_timestamp != 0) {
+		psa->last_conv_timestamp = max_timestamp;
+		
+		purple_account_set_int(psa->account, "last_conv_timestamp_high", max_timestamp >> 32);
+		purple_account_set_int(psa->account, "last_conv_timestamp_low", max_timestamp & 0xFFFFFFFF);
+	}
+}
+
+static gboolean
+pulsesms_fetch_conversations(gpointer data)
+{
+	PulseSMSAccount *psa = data;
+	const gchar *account_id = purple_account_get_string(psa->account, "account_id", NULL);
+	
+	PurpleHttpRequest *request = purple_http_request_new(NULL);
+	purple_http_request_set_keepalive_pool(request, psa->keepalive_pool);
+	
+	purple_http_request_set_url_printf(request, PULSESMS_API_HOST "/api/v1/conversations/index_public_unarchived?account_id=%s", purple_url_encode(account_id));
+	
+	purple_http_request(psa->pc, request, pulsesms_got_conversations, psa);
+	purple_http_request_unref(request);
+	
+	return TRUE;
+}
+
+static void
 pulsesms_start_stuff(PulseSMSAccount *psa)
 {
 	//TODO
@@ -286,6 +445,9 @@ pulsesms_start_stuff(PulseSMSAccount *psa)
 	
 	pulsesms_create_ctx(psa);
 	pulsesms_fetch_contacts(psa);
+	
+	pulsesms_fetch_conversations(psa);
+	psa->conv_fetch_timeout = g_timeout_add_seconds(60, pulsesms_fetch_conversations, psa);
 	
 	purple_connection_set_state(psa->pc, PURPLE_CONNECTION_CONNECTED);
 }
@@ -423,7 +585,14 @@ pulsesms_login(PurpleAccount *account)
 	psa->pc = pc;
 	psa->keepalive_pool = purple_http_keepalive_pool_new();
 	psa->sent_message_ids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	psa->im_conversations = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, g_free);
+	psa->im_conversations_rev = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 	psa->ctx = g_new0(struct AES_ctx, 1);
+	
+	psa->last_conv_timestamp = purple_account_get_int(account, "last_conv_timestamp_high", 0);
+	if (psa->last_conv_timestamp != 0) {
+		psa->last_conv_timestamp = (psa->last_conv_timestamp << 32) | ((gint64) purple_account_get_int(account, "last_conv_timestamp_low", 0) & 0xFFFFFFFF);
+	}
 	
 	purple_connection_set_protocol_data(pc, psa);
 	
@@ -445,6 +614,10 @@ pulsesms_close(PurpleConnection *pc)
 	
 	psa = purple_connection_get_protocol_data(pc);
 	purple_signals_disconnect_by_handle(psa->account);
+	
+	if (psa->conv_fetch_timeout) {
+		g_source_remove(psa->conv_fetch_timeout);
+	}
 	
 	purple_http_conn_cancel_all(pc);
 	
