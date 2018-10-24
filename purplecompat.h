@@ -211,6 +211,34 @@ purple_chat_conversation_find_user(PurpleChatConversation *chat, const char *nam
 #define purple_xmlnode_insert_data   xmlnode_insert_data
 #define purple_xmlnode_free          xmlnode_free
 
+#ifndef _IMAGE_STORE_H_
+#define _IMAGE_STORE_H_
+
+#include "imgstore.h"
+
+#define purple_image_store_add(img)  purple_imgstore_add_with_id( \
+	g_memdup(purple_imgstore_get_data(img), purple_imgstore_get_size(img)), \
+	purple_imgstore_get_size(img), purple_imgstore_get_filename(img))
+#define purple_image_store_get       purple_imgstore_find_by_id
+
+
+#endif /*_IMAGE_STORE_H_*/
+
+#ifndef _IMAGE_H_
+#define _IMAGE_H_
+
+#define PurpleImage  PurpleStoredImage
+#define purple_image_new_from_file(p, e)  purple_imgstore_new_from_file(p)
+#define purple_image_new_from_data(d, l)  purple_imgstore_add(d, l, NULL)
+#define purple_image_get_path             purple_imgstore_get_filename
+#define purple_image_get_data_size        purple_imgstore_get_size
+#define purple_image_get_data             purple_imgstore_get_data
+#define purple_image_get_extension        purple_imgstore_get_extension
+
+#endif /* _IMAGE_H_ */
+
+
+
 
 #endif
 

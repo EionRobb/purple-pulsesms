@@ -83,8 +83,12 @@ static void pulsesms_create_ctx(PulseSMSAccount *psa);
 /*****************************************************************************/
 
 static gchar *
-pulsesms_decrypt(PulseSMSAccount *psa, const gchar *data)
+pulsesms_decrypt_len(PulseSMSAccount *psa, const gchar *data, gsize *len)
 {
+	if (data == NULL) {
+		return NULL;
+	}
+	
 	gchar **parts = g_strsplit(data, "-:-", 2);
 	gsize text_len, iv_len;
 	guchar *ciphertext = g_base64_decode(parts[1], &text_len);
@@ -106,7 +110,18 @@ pulsesms_decrypt(PulseSMSAccount *psa, const gchar *data)
 	//strip PKCS#5 padding
 	buf[text_len - buf[text_len - 1]] = '\0';
 	
+	if (len != NULL) {
+		*len = text_len;
+	}
+	
 	return (gchar *) buf;
+}
+
+
+static gchar *
+pulsesms_decrypt(PulseSMSAccount *psa, const gchar *data)
+{
+	return pulsesms_decrypt_len(psa, data, NULL);
 }
 
 // A reimplementation of gnulib's function, but using purple/glib functions
@@ -290,6 +305,58 @@ pulsesms_fetch_contacts(PulseSMSAccount *psa)
 }
 
 static void
+pulsesms_got_http_image_for_conv(PurpleHttpConnection *http_conn, PurpleHttpResponse *response, gpointer user_data)
+{
+	PulseSMSAccount *psa = user_data;
+	PurpleHttpRequest *request = purple_http_conn_get_request(http_conn);
+	const gchar *phone_number = g_dataset_get_data(request, "phone_number");
+	gint message_type = GPOINTER_TO_INT(g_dataset_get_data(request, "message_type"));
+	gint timestamp = GPOINTER_TO_INT(g_dataset_get_data(request, "timestamp"));
+	gsize len;
+	const gchar *data = purple_http_response_get_data(response, &len);
+	PurpleImage *image;
+	guint image_id;
+	gchar *image_message;
+	
+	if (purple_http_response_get_error(response) != NULL) {
+		g_dataset_destroy(request);
+		return;
+	}
+	
+	gsize image_len;
+	gchar *image_data = pulsesms_decrypt_len(psa, data, &image_len);
+	
+	image = purple_image_new_from_data(image_data, image_len);
+	image_id = purple_image_store_add(image);
+	image_message = g_strdup_printf("<img id='%ud' />", image_id);
+	
+	if (message_type == 0) {
+		purple_serv_got_im(psa->pc, phone_number, image_message, PURPLE_MESSAGE_RECV | PURPLE_MESSAGE_IMAGES, timestamp);
+		
+	} else if (message_type == 1 || message_type == 2) {
+		PurpleConversation *conv;
+		PurpleIMConversation *imconv;
+		PurpleMessage *msg;
+
+		imconv = purple_conversations_find_im_with_account(phone_number, psa->account);
+
+		if (imconv == NULL) {
+			imconv = purple_im_conversation_new(psa->account, phone_number);
+		}
+
+		conv = PURPLE_CONVERSATION(imconv);
+
+		msg = purple_message_new_outgoing(phone_number, image_message, PURPLE_MESSAGE_SEND | PURPLE_MESSAGE_REMOTE_SEND | PURPLE_MESSAGE_DELAYED | PURPLE_MESSAGE_IMAGES);
+		purple_message_set_time(msg, timestamp);
+		purple_conversation_write_message(conv, msg);
+		purple_message_destroy(msg);
+	}
+	
+	g_free(image_message);
+	g_dataset_destroy(request);
+}
+
+static void
 pulsesms_got_conversation_history(PurpleHttpConnection *http_conn, PurpleHttpResponse *response, gpointer user_data)
 {
 	PulseSMSAccount *psa = user_data;
@@ -309,6 +376,7 @@ pulsesms_got_conversation_history(PurpleHttpConnection *http_conn, PurpleHttpRes
 		
 		// use /api/v1/conversations/" conv_id "?account_id=... to lookup unknown conv ids
 		
+		g_dataset_destroy(request);
 		g_free(conv_id_str);
 		g_free(since_str);
 		return;
@@ -320,35 +388,54 @@ pulsesms_got_conversation_history(PurpleHttpConnection *http_conn, PurpleHttpRes
 		gchar *data = pulsesms_decrypt(psa, json_object_get_string_member(message, "data"));
 		gchar *escaped_data = purple_markup_escape_text(data, -1);
 		gint64 timestamp = json_object_get_int_member(message, "timestamp");
+		gchar *mime_type = pulsesms_decrypt(psa, json_object_get_string_member(message, "mime_type"));
 		
 		  //if (message.message_type == 0) { // received or media
 		  //} else if (message.message_type == 6) {  //media preview
 		  //} else if (message.message_type == 3) {  //error
 		  //} else if (message.message_type == 5) {  //info
-			//} else {  //sent message   (2 sending, 1 sent)?
+			//} else {  //sent message   (2 sending, 1 sent, 4 delivered)
 		if (timestamp > since) {
-			if (message_type == 0) {
-				purple_serv_got_im(psa->pc, phone_number, escaped_data, PURPLE_MESSAGE_RECV, timestamp / 1000);
+			if (mime_type && strncmp(mime_type, "image/", 6) == 0) {
+				gint64 message_id = json_object_get_int_member(message, "device_id");
+				PurpleHttpRequest *request = purple_http_request_new(NULL);
+				const gchar *account_id = purple_account_get_string(psa->account, "account_id", NULL);
 				
-			} else if (message_type == 1 || message_type == 2) {
-				PurpleConversation *conv;
-				PurpleIMConversation *imconv;
-				PurpleMessage *msg;
+				purple_http_request_set_url_printf(request, PULSESMS_API_HOST "/api/v1/media/%" G_GINT64_FORMAT "?account_id=%s", message_id, purple_url_encode(account_id));
+				
+				g_dataset_set_data(request, "message_type", GINT_TO_POINTER((int) message_type));
+				g_dataset_set_data(request, "timestamp", GINT_TO_POINTER((int) (timestamp / 1000)));
+				g_dataset_set_data_full(request, "phone_number", g_strdup(phone_number), g_free);
+				purple_http_request_set_max_len(request, -1);
+				purple_http_request_header_set(request, "Accept-Encoding", " "); // Disable compression to disable crashing
+				purple_http_request(psa->pc, request, pulsesms_got_http_image_for_conv, psa);
+				purple_http_request_unref(request);
+				
+			} else {
+				if (message_type == 0) {
+					purple_serv_got_im(psa->pc, phone_number, escaped_data, PURPLE_MESSAGE_RECV, timestamp / 1000);
+					
+				} else if (message_type == 1 || message_type == 2) {
+					PurpleConversation *conv;
+					PurpleIMConversation *imconv;
+					PurpleMessage *msg;
 
-				imconv = purple_conversations_find_im_with_account(phone_number, psa->account);
+					imconv = purple_conversations_find_im_with_account(phone_number, psa->account);
 
-				if (imconv == NULL) {
-					imconv = purple_im_conversation_new(psa->account, phone_number);
+					if (imconv == NULL) {
+						imconv = purple_im_conversation_new(psa->account, phone_number);
+					}
+
+					conv = PURPLE_CONVERSATION(imconv);
+
+					if (escaped_data && *escaped_data) {
+						msg = purple_message_new_outgoing(phone_number, escaped_data, PURPLE_MESSAGE_SEND | PURPLE_MESSAGE_REMOTE_SEND | PURPLE_MESSAGE_DELAYED);
+						purple_message_set_time(msg, timestamp / 1000);
+						purple_conversation_write_message(conv, msg);
+						purple_message_destroy(msg);
+					}
 				}
-
-				conv = PURPLE_CONVERSATION(imconv);
-
-				if (escaped_data && *escaped_data) {
-					msg = purple_message_new_outgoing(phone_number, escaped_data, PURPLE_MESSAGE_SEND | PURPLE_MESSAGE_REMOTE_SEND | PURPLE_MESSAGE_DELAYED);
-					purple_message_set_time(msg, timestamp / 1000);
-					purple_conversation_write_message(conv, msg);
-					purple_message_destroy(msg);
-				}
+				
 			}
 		}
 		
@@ -357,6 +444,7 @@ pulsesms_got_conversation_history(PurpleHttpConnection *http_conn, PurpleHttpRes
   
 	}
 	
+	g_dataset_destroy(request);
 	g_free(conv_id_str);
 	g_free(since_str);
 }
