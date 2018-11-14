@@ -230,6 +230,7 @@ pulsesms_send_im(PurpleConnection *pc,
 #endif
 	GString *postbody;
 	PulseSMSAccount *psa = purple_connection_get_protocol_data(pc);
+	gchar *stripped_message;
 	
 	PurpleHttpRequest *request = purple_http_request_new(PULSESMS_API_HOST "/api/v1/messages/forward_to_phone");
 	purple_http_request_set_keepalive_pool(request, psa->keepalive_pool);
@@ -237,10 +238,12 @@ pulsesms_send_im(PurpleConnection *pc,
 	purple_http_request_set_method(request, "POST");
 	purple_http_request_header_set(request, "Content-type", "application/x-www-form-urlencoded; charset=UTF-8");
 	
+	stripped_message = g_strstrip(purple_markup_strip_html(message));
+	
 	postbody = g_string_new(NULL);
 	g_string_append_printf(postbody, "account_id=%s&", purple_url_encode(purple_account_get_string(psa->account, "account_id", "")));
 	g_string_append_printf(postbody, "to=%s&", purple_url_encode(who));
-	g_string_append_printf(postbody, "message=%s&", purple_url_encode(message));
+	g_string_append_printf(postbody, "message=%s&", purple_url_encode(stripped_message));
 	g_string_append_printf(postbody, "sent_device=3&"); //Native client
 	purple_http_request_set_contents(request, postbody->str, postbody->len);
 	g_string_free(postbody, TRUE);
@@ -248,6 +251,7 @@ pulsesms_send_im(PurpleConnection *pc,
 	purple_http_request(psa->pc, request, NULL, NULL);
 	purple_http_request_unref(request);
 	
+	g_free(stripped_message);
 	return 1;
 }
 
