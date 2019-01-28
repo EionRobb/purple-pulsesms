@@ -583,6 +583,11 @@ pulsesms_got_login(PurpleHttpConnection *http_conn, PurpleHttpResponse *response
 	const gchar *data = purple_http_response_get_data(response, &len);
 	JsonObject *info = json_decode_object(data, len);
 	
+	if (!info) {
+		purple_connection_error(psa->pc, PURPLE_CONNECTION_ERROR_AUTHENTICATION_FAILED, "Invalid username/password");
+		return;
+	}
+	
 	purple_account_set_string(psa->account, "account_id", json_object_get_string_member(info, "account_id"));
 	purple_account_set_string(psa->account, "salt", json_object_get_string_member(info, "salt1"));
 	
