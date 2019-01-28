@@ -58,6 +58,9 @@ typedef struct {
 	
 	GHashTable *im_conversations;     // conv_id -> phone number
 	GHashTable *im_conversations_rev; // phone#  -> conv_id
+	
+	GHashTable *normalised_phone_lookup; // phone# -> id
+	GHashTable *normalised_id_lookup; // id -> phone#
 } PulseSMSAccount;
 
 
@@ -217,6 +220,31 @@ json_decode_object(const gchar *data, gssize len)
 
 /*****************************************************************************/
 
+static const char *
+pulsesms_normalize(const PurpleAccount *account, const char *who)
+{
+	PurpleConnection *pc = purple_account_get_connection(account);
+	PulseSMSAccount *psa = pc ? purple_connection_get_protocol_data(pc) : NULL;
+	
+	// if (who[0] == '+') {
+		// return who;
+	// }
+	
+	if (!pc || !psa) {
+		return who;
+	}
+	
+	const gchar *normalised_id = g_hash_table_lookup(psa->normalised_phone_lookup, who);
+	if (normalised_id) {
+		const gchar *normalised_phone = g_hash_table_lookup(psa->normalised_id_lookup, normalised_id);
+		if (normalised_phone) {
+			return normalised_phone;
+		}
+	}
+	
+	return who;
+}
+
 static int
 pulsesms_send_im(PurpleConnection *pc,
 #if PURPLE_VERSION_CHECK(3, 0, 0)
@@ -278,10 +306,13 @@ pulsesms_got_contacts(PurpleHttpConnection *http_conn, PurpleHttpResponse *respo
 		gchar *name = pulsesms_decrypt(psa, json_object_get_string_member(contact, "name"));
 		gchar *id_matcher = pulsesms_decrypt(psa, json_object_get_string_member(contact, "id_matcher"));
 		
-		//purple_debug_info("pulsesms", "phone_number: %s, name: %s, id_matcher: %s\n", phone_number, name, id_matcher);
+		purple_debug_info("pulsesms", "phone_number: %s, name: %s, id_matcher: %s\n", phone_number, name, id_matcher);
 		
 		//TODO use this to join contacts together with their international number equivalents
-		(void) id_matcher;
+		g_hash_table_insert(psa->normalised_phone_lookup, g_strdup(phone_number), g_strdup(id_matcher));
+		if (phone_number[0] == '+' || purple_strequal(id_matcher, phone_number)) {
+			g_hash_table_insert(psa->normalised_id_lookup, g_strdup(id_matcher), g_strdup(phone_number));
+		}
 		
 		PurpleBuddy *buddy = purple_blist_find_buddy(psa->account, phone_number);
 
@@ -678,7 +709,9 @@ pulsesms_login(PurpleAccount *account)
 	psa->keepalive_pool = purple_http_keepalive_pool_new();
 	psa->sent_message_ids = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
 	psa->im_conversations = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, g_free);
-	psa->im_conversations_rev = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+	psa->im_conversations_rev = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+	psa->normalised_phone_lookup = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+	psa->normalised_id_lookup = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 	psa->ctx = g_new0(struct AES_ctx, 1);
 	
 	psa->last_conv_timestamp = purple_account_get_int(account, "last_conv_timestamp_high", 0);
@@ -717,6 +750,18 @@ pulsesms_close(PurpleConnection *pc)
 	
 	g_hash_table_remove_all(psa->sent_message_ids);
 	g_hash_table_unref(psa->sent_message_ids);
+	
+	g_hash_table_remove_all(psa->im_conversations);
+	g_hash_table_unref(psa->im_conversations);
+	g_hash_table_remove_all(psa->im_conversations_rev);
+	g_hash_table_unref(psa->im_conversations_rev);
+	
+	g_hash_table_remove_all(psa->normalised_phone_lookup);
+	g_hash_table_unref(psa->normalised_phone_lookup);
+	psa->normalised_phone_lookup = NULL;
+	g_hash_table_remove_all(psa->normalised_id_lookup);
+	g_hash_table_unref(psa->normalised_id_lookup);
+	psa->normalised_id_lookup = NULL;
 	
 	g_free(psa->ctx);
 	
@@ -959,6 +1004,7 @@ init_plugin(PurplePlugin *plugin)
 	prpl_info->status_types = pulsesms_status_types;
 	prpl_info->list_icon = pulsesms_list_icon;
 	prpl_info->offline_message = pulsesms_offline_message;
+	prpl_info->normalize = pulsesms_normalize;
 	
 	prpl_info->send_im = pulsesms_send_im;
 	
