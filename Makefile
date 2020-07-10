@@ -71,7 +71,7 @@ C_FILES := aes.c
 PURPLE_COMPAT_FILES := purple2compat/http.c purple2compat/purple-socket.c
 PURPLE_C_FILES := libpulsesms.c $(C_FILES)
 
-AES_FLAGS += -DAES256=1 -DECB=0 -DCTR=0 -DCBC=1
+AES_FLAGS += -DAES256=1 -DECB=0 -DCTR=0 -DCBC=1 -DMULTIPLY_AS_A_FUNCTION=1
 
 .PHONY:	all install FAILNOPURPLE clean
 

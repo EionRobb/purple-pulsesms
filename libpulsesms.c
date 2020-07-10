@@ -306,6 +306,12 @@ pulsesms_got_contacts(PurpleHttpConnection *http_conn, PurpleHttpResponse *respo
 		gchar *name = pulsesms_decrypt(psa, json_object_get_string_member(contact, "name"));
 		gchar *id_matcher = pulsesms_decrypt(psa, json_object_get_string_member(contact, "id_matcher"));
 		
+		if (!phone_number) {
+			g_free(name);
+			g_free(id_matcher);
+			continue;
+		}
+		
 		purple_debug_info("pulsesms", "phone_number: %s, name: %s, id_matcher: %s\n", phone_number, name, id_matcher);
 		
 		//TODO use this to join contacts together with their international number equivalents
@@ -322,7 +328,13 @@ pulsesms_got_contacts(PurpleHttpConnection *http_conn, PurpleHttpResponse *respo
 		}
 		
 		purple_protocol_got_user_status(psa->account, phone_number, "mobile", NULL);
+		
+		g_free(phone_number);
+		g_free(name);
+		g_free(id_matcher);
 	}
+	
+	json_array_unref(contacts);
 }
 
 static void
@@ -414,6 +426,7 @@ pulsesms_got_conversation_history(PurpleHttpConnection *http_conn, PurpleHttpRes
 		g_dataset_destroy(request);
 		g_free(conv_id_str);
 		g_free(since_str);
+		json_array_unref(messages);
 		return;
 	}
 	
@@ -475,6 +488,7 @@ pulsesms_got_conversation_history(PurpleHttpConnection *http_conn, PurpleHttpRes
 		}
 		
 		g_free(data);
+		g_free(mime_type);
 		g_free(escaped_data);
   
 	}
@@ -482,6 +496,7 @@ pulsesms_got_conversation_history(PurpleHttpConnection *http_conn, PurpleHttpRes
 	g_dataset_destroy(request);
 	g_free(conv_id_str);
 	g_free(since_str);
+	json_array_unref(messages);
 }
 
 static void
@@ -540,6 +555,8 @@ pulsesms_got_conversations(PurpleHttpConnection *http_conn, PurpleHttpResponse *
 		purple_account_set_int(psa->account, "last_conv_timestamp_high", max_timestamp >> 32);
 		purple_account_set_int(psa->account, "last_conv_timestamp_low", max_timestamp & 0xFFFFFFFF);
 	}
+	
+	json_array_unref(conversations);
 }
 
 static gboolean
@@ -606,6 +623,8 @@ pulsesms_got_login(PurpleHttpConnection *http_conn, PurpleHttpResponse *response
 	g_free(hash);
 	
 	pulsesms_start_stuff(psa);
+	
+	json_object_unref(info);
 }
 
 static void
