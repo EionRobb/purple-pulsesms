@@ -93,9 +93,20 @@ pulsesms_decrypt_len(PulseSMSAccount *psa, const gchar *data, gsize *len)
 	}
 	
 	gchar **parts = g_strsplit(data, "-:-", 2);
+	purple_str_strip_char(parts[0], '\n');
+	purple_str_strip_char(parts[1], '\n');
+	
 	gsize text_len, iv_len;
 	guchar *ciphertext = g_base64_decode(parts[1], &text_len);
 	guchar *IV = g_base64_decode(parts[0], &iv_len);
+	
+	if (!ciphertext || !IV) {
+		purple_debug_error("pulsesms", "Error, unable to base64 decode %s\n", data);
+		g_free(ciphertext);
+		g_free(IV);
+		return NULL;
+	}
+	
 	gsize buf_len = text_len + AES_BLOCKLEN - (text_len % AES_BLOCKLEN);
 	
 	guchar *buf = g_new0(guchar, buf_len);
